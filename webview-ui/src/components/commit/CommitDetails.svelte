@@ -178,7 +178,7 @@
   // passed to FileDiffView and the tree's "Reverse File" action.
   const canReverseInThisView = $derived(!!commit && stashIndex === null);
 
-  let filesPanelWidth = $state(240);
+  let filesPanelWidth = $state(360);
   let isResizing = $state(false);
   let resizeStartX = 0;
   let resizeStartWidth = 0;
@@ -461,7 +461,28 @@
       return nodes;
     }
 
-    return sortTree(root.children);
+    function compactDirectoryChains(nodes: FileTreeNode[]): FileTreeNode[] {
+      return nodes.map((node) => {
+        if (node.isFile) return node;
+
+        const names = [node.name];
+        let current = node;
+        while (true) {
+          const onlyChild = current.children.length === 1 ? current.children[0] : undefined;
+          if (!onlyChild || onlyChild.isFile) break;
+          current = onlyChild;
+          names.push(current.name);
+        }
+
+        return {
+          ...current,
+          name: names.join('/'),
+          children: compactDirectoryChains(current.children),
+        };
+      });
+    }
+
+    return compactDirectoryChains(sortTree(root.children));
   }
 
   // All changed-file paths under a tree node (the node itself if it's a file).
