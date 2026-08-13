@@ -17,6 +17,15 @@ import { parseLog, parseBranches, parseTags, parseRemotes, parseStashList, parse
 import { buildReversePatch } from './patch-builder';
 import type { Commit, BranchInfo, TagInfo, RemoteInfo, StashEntry, LogOptions, DiffData, WorktreeInfo, CommitSignature } from './types';
 
+type GitFlowConfig = {
+  productionBranch: string;
+  developBranch: string;
+  featurePrefix: string;
+  releasePrefix: string;
+  hotfixPrefix: string;
+  versionTagPrefix: string;
+};
+
 export class GitError extends Error {
   constructor(
     public stderr: string,
@@ -2185,6 +2194,73 @@ export class GitService {
 
   // --- Git Flow ---
 
+  private async localBranchExists(name: string): Promise<boolean> {
+    this.assertSafeRef(name, 'branch exists');
+    try {
+      await this.exec(['show-ref', '--verify', '--quiet', `refs/heads/${name}`], { silent: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async assertLocalBranchExists(name: string, operation: string): Promise<void> {
+    if (await this.localBranchExists(name)) return;
+    throw new GitError(`${operation} reported success, but branch '${name}' was not created.`, 1, []);
+  }
+
+  private async assertBranchesNotBehindUpstream(branchNames: string[], operation: string): Promise<void> {
+    const names = Array.from(new Set(branchNames.filter(Boolean)));
+    if (names.length === 0) return;
+    const nameSet = new Set(names);
+    const branches = await this.branches();
+    const behindBranches = branches
+      .filter(branch => !branch.remote && nameSet.has(branch.name) && !!branch.upstream && !branch.upstreamGone && branch.behind > 0);
+    if (behindBranches.length === 0) return;
+
+    const details = behindBranches
+      .map(branch => `${branch.name} is behind ${branch.upstream} by ${branch.behind} commit${branch.behind === 1 ? '' : 's'}`)
+      .join('; ');
+    throw new GitError(
+      `Cannot ${operation}: ${details}. Pull or fast-forward the branch before running Git Flow.`,
+      1,
+      ['flow']
+    );
+  }
+
+  private async requireFlowConfig(): Promise<GitFlowConfig> {
+    const config = await this.getFlowConfig();
+    if (!config) {
+      throw new GitError('Git Flow is not initialized for this repository.', 1, ['flow']);
+    }
+    return config;
+  }
+
+  private flowConfigMatches(config: GitFlowConfig, options: GitFlowConfig): boolean {
+    return config.productionBranch === options.productionBranch
+      && config.developBranch === options.developBranch
+      && config.featurePrefix === options.featurePrefix
+      && config.releasePrefix === options.releasePrefix
+      && config.hotfixPrefix === options.hotfixPrefix
+      && config.versionTagPrefix === options.versionTagPrefix;
+  }
+
+  private async clearFlowBranchConfig(): Promise<void> {
+    await Promise.all([
+      this.exec(['config', '--local', '--unset-all', 'gitflow.branch.master'], { silent: true }).catch(() => undefined),
+      this.exec(['config', '--local', '--unset-all', 'gitflow.branch.develop'], { silent: true }).catch(() => undefined),
+    ]);
+  }
+
+  private async writeFlowConfig(options: GitFlowConfig): Promise<void> {
+    await this.exec(['config', '--local', '--replace-all', 'gitflow.branch.master', options.productionBranch]);
+    await this.exec(['config', '--local', '--replace-all', 'gitflow.branch.develop', options.developBranch]);
+    await this.exec(['config', '--local', '--replace-all', 'gitflow.prefix.feature', options.featurePrefix]);
+    await this.exec(['config', '--local', '--replace-all', 'gitflow.prefix.release', options.releasePrefix]);
+    await this.exec(['config', '--local', '--replace-all', 'gitflow.prefix.hotfix', options.hotfixPrefix]);
+    await this.exec(['config', '--local', '--replace-all', 'gitflow.prefix.versiontag', options.versionTagPrefix]);
+  }
+
   async flowInit(options: {
     productionBranch: string;
     developBranch: string;
@@ -2193,31 +2269,34 @@ export class GitService {
     hotfixPrefix: string;
     versionTagPrefix: string;
   }): Promise<string> {
-    // production 브랜치 존재 여부 검증
-    try {
-      await this.exec(['rev-parse', '--verify', options.productionBranch]);
-    } catch {
+    if (options.productionBranch === options.developBranch) {
+      throw new GitError('Git Flow production and develop branches must be different.', 1, ['flow', 'init']);
+    }
+
+    if (!(await this.localBranchExists(options.productionBranch))) {
       throw new GitError(
         `Branch '${options.productionBranch}' does not exist. Create the production branch first or ensure at least one commit exists.`,
         1,
         ['flow', 'init']
       );
     }
+    await this.assertBranchesNotBehindUpstream([options.productionBranch], 'initialize Git Flow');
 
-    // git flow init -d로 기본 초기화 후 커스텀 설정 덮어쓰기
-    await this.exec(['flow', 'init', '-d']);
-    await this.exec(['config', 'gitflow.branch.master', options.productionBranch]);
-    await this.exec(['config', 'gitflow.branch.develop', options.developBranch]);
-    await this.exec(['config', 'gitflow.prefix.feature', options.featurePrefix]);
-    await this.exec(['config', 'gitflow.prefix.release', options.releasePrefix]);
-    await this.exec(['config', 'gitflow.prefix.hotfix', options.hotfixPrefix]);
-    await this.exec(['config', 'gitflow.prefix.versiontag', options.versionTagPrefix]);
+    await this.clearFlowBranchConfig();
+    await this.exec(['config', '--local', '--replace-all', 'gitflow.branch.master', options.productionBranch]);
+    await this.exec(['config', '--local', '--replace-all', 'gitflow.branch.develop', options.developBranch]);
+    await this.exec(['flow', 'init', '-f', '-d']);
 
-    // develop 브랜치가 없으면 생성
-    try {
-      await this.exec(['rev-parse', '--verify', options.developBranch]);
-    } catch {
+    if (!(await this.localBranchExists(options.developBranch))) {
       await this.exec(['branch', options.developBranch, options.productionBranch]);
+    }
+    await this.assertLocalBranchExists(options.developBranch, 'Git Flow initialization');
+
+    await this.writeFlowConfig(options);
+
+    const persistedConfig = await this.getFlowConfig();
+    if (!persistedConfig || !this.flowConfigMatches(persistedConfig, options)) {
+      throw new GitError('Git Flow initialization did not persist the requested configuration.', 1, ['flow', 'init']);
     }
 
     return 'Git Flow initialized';
@@ -2225,50 +2304,72 @@ export class GitService {
 
   async flowFeatureStart(name: string): Promise<string> {
     this.assertSafeRef(name, 'flow feature start');
-    return this.exec(['flow', 'feature', 'start', name]);
+    const config = await this.requireFlowConfig();
+    await this.assertBranchesNotBehindUpstream([config.developBranch], 'start Git Flow feature');
+    const result = await this.exec(['flow', 'feature', 'start', name]);
+    await this.assertLocalBranchExists(`${config.featurePrefix}${name}`, 'Git Flow feature start');
+    return result;
   }
 
   async flowFeatureFinish(name: string): Promise<string> {
     this.assertSafeRef(name, 'flow feature finish');
+    const config = await this.requireFlowConfig();
+    await this.assertBranchesNotBehindUpstream([
+      config.developBranch,
+      `${config.featurePrefix}${name}`,
+    ], 'finish Git Flow feature');
     return this.exec(['flow', 'feature', 'finish', name]);
   }
 
   async flowReleaseStart(version: string): Promise<string> {
     this.assertSafeRef(version, 'flow release start');
-    return this.exec(['flow', 'release', 'start', version]);
+    const config = await this.requireFlowConfig();
+    await this.assertBranchesNotBehindUpstream([config.developBranch], 'start Git Flow release');
+    const result = await this.exec(['flow', 'release', 'start', version]);
+    await this.assertLocalBranchExists(`${config.releasePrefix}${version}`, 'Git Flow release start');
+    return result;
   }
 
   async flowReleaseFinish(version: string): Promise<string> {
     this.assertSafeRef(version, 'flow release finish');
+    const config = await this.requireFlowConfig();
+    await this.assertBranchesNotBehindUpstream([
+      config.productionBranch,
+      config.developBranch,
+      `${config.releasePrefix}${version}`,
+    ], 'finish Git Flow release');
     return this.exec(['flow', 'release', 'finish', '-m', version, version]);
   }
 
   async flowHotfixStart(version: string): Promise<string> {
     this.assertSafeRef(version, 'flow hotfix start');
-    return this.exec(['flow', 'hotfix', 'start', version]);
+    const config = await this.requireFlowConfig();
+    await this.assertBranchesNotBehindUpstream([config.productionBranch], 'start Git Flow hotfix');
+    const result = await this.exec(['flow', 'hotfix', 'start', version]);
+    await this.assertLocalBranchExists(`${config.hotfixPrefix}${version}`, 'Git Flow hotfix start');
+    return result;
   }
 
   async flowHotfixFinish(version: string): Promise<string> {
     this.assertSafeRef(version, 'flow hotfix finish');
+    const config = await this.requireFlowConfig();
+    await this.assertBranchesNotBehindUpstream([
+      config.productionBranch,
+      config.developBranch,
+      `${config.hotfixPrefix}${version}`,
+    ], 'finish Git Flow hotfix');
     return this.exec(['flow', 'hotfix', 'finish', '-m', version, version]);
   }
 
-  async getFlowConfig(): Promise<{
-    productionBranch: string;
-    developBranch: string;
-    featurePrefix: string;
-    releasePrefix: string;
-    hotfixPrefix: string;
-    versionTagPrefix: string;
-  } | null> {
+  async getFlowConfig(): Promise<GitFlowConfig | null> {
     try {
       const [production, develop, feature, release, hotfix, versionTag] = await Promise.all([
-        this.exec(['config', '--get', 'gitflow.branch.master']).then(s => s.trim()),
-        this.exec(['config', '--get', 'gitflow.branch.develop']).then(s => s.trim()),
-        this.exec(['config', '--get', 'gitflow.prefix.feature']).then(s => s.trim()),
-        this.exec(['config', '--get', 'gitflow.prefix.release']).then(s => s.trim()),
-        this.exec(['config', '--get', 'gitflow.prefix.hotfix']).then(s => s.trim()),
-        this.exec(['config', '--get', 'gitflow.prefix.versiontag']).then(s => s.trim()).catch(() => ''),
+        this.exec(['config', '--local', '--get', 'gitflow.branch.master']).then(s => s.trim()),
+        this.exec(['config', '--local', '--get', 'gitflow.branch.develop']).then(s => s.trim()),
+        this.exec(['config', '--local', '--get', 'gitflow.prefix.feature']).then(s => s.trim()),
+        this.exec(['config', '--local', '--get', 'gitflow.prefix.release']).then(s => s.trim()),
+        this.exec(['config', '--local', '--get', 'gitflow.prefix.hotfix']).then(s => s.trim()),
+        this.exec(['config', '--local', '--get', 'gitflow.prefix.versiontag']).then(s => s.trim()).catch(() => ''),
       ]);
       return {
         productionBranch: production,
@@ -2278,7 +2379,11 @@ export class GitService {
         hotfixPrefix: hotfix,
         versionTagPrefix: versionTag,
       };
-    } catch (err) { console.warn('Git Graph+: failed to get flow config:', err instanceof Error ? err.message : err); return null; }
+    } catch (err) {
+      if (err instanceof GitError && err.exitCode === 1) return null;
+      console.warn('Git Graph+: failed to get flow config:', err instanceof Error ? err.message : err);
+      return null;
+    }
   }
 
   async getFlowBranches(): Promise<{ features: string[]; releases: string[]; hotfixes: string[] }> {
@@ -2452,9 +2557,18 @@ export class GitService {
 
   async isFlowInitialized(): Promise<boolean> {
     try {
-      await this.exec(['config', '--get', 'gitflow.branch.master']);
-      return true;
-    } catch (err) { console.warn('Git Graph+: flow init check failed:', err instanceof Error ? err.message : err); return false; }
+      const config = await this.getFlowConfig();
+      if (!config) return false;
+      const [productionExists, developExists] = await Promise.all([
+        this.localBranchExists(config.productionBranch),
+        this.localBranchExists(config.developBranch),
+      ]);
+      return productionExists && developExists;
+    } catch (err) {
+      if (err instanceof GitError && err.exitCode === 1) return false;
+      console.warn('Git Graph+: flow init check failed:', err instanceof Error ? err.message : err);
+      return false;
+    }
   }
 
 }
