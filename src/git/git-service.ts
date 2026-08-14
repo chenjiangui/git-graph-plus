@@ -2209,7 +2209,7 @@ export class GitService {
     throw new GitError(`${operation} reported success, but branch '${name}' was not created.`, 1, []);
   }
 
-  private async assertBranchesNotBehindUpstream(branchNames: string[], operation: string): Promise<void> {
+  private async pullRebaseBranchesBehindUpstream(branchNames: string[]): Promise<void> {
     const names = Array.from(new Set(branchNames.filter(Boolean)));
     if (names.length === 0) return;
     const nameSet = new Set(names);
@@ -2218,14 +2218,22 @@ export class GitService {
       .filter(branch => !branch.remote && nameSet.has(branch.name) && !!branch.upstream && !branch.upstreamGone && branch.behind > 0);
     if (behindBranches.length === 0) return;
 
-    const details = behindBranches
-      .map(branch => `${branch.name} is behind ${branch.upstream} by ${branch.behind} commit${branch.behind === 1 ? '' : 's'}`)
-      .join('; ');
-    throw new GitError(
-      `Cannot ${operation}: ${details}. Pull or fast-forward the branch before running Git Flow.`,
-      1,
-      ['flow']
-    );
+    const currentBranch = branches.find(branch => branch.current && !branch.remote)?.name;
+    const originalRef = currentBranch
+      ?? await this.exec(['rev-parse', '--verify', 'HEAD'], { silent: true }).then(s => s.trim()).catch(() => undefined);
+    let checkedOutBranch = currentBranch;
+
+    for (const branch of behindBranches) {
+      if (checkedOutBranch !== branch.name) {
+        await this.checkout(branch.name);
+        checkedOutBranch = branch.name;
+      }
+      await this.pull(undefined, undefined, { rebase: true });
+    }
+
+    if (originalRef && checkedOutBranch !== originalRef) {
+      await this.checkout(originalRef);
+    }
   }
 
   private async requireFlowConfig(): Promise<GitFlowConfig> {
@@ -2280,7 +2288,7 @@ export class GitService {
         ['flow', 'init']
       );
     }
-    await this.assertBranchesNotBehindUpstream([options.productionBranch], 'initialize Git Flow');
+    await this.pullRebaseBranchesBehindUpstream([options.productionBranch]);
 
     await this.clearFlowBranchConfig();
     await this.exec(['config', '--local', '--replace-all', 'gitflow.branch.master', options.productionBranch]);
@@ -2305,7 +2313,7 @@ export class GitService {
   async flowFeatureStart(name: string): Promise<string> {
     this.assertSafeRef(name, 'flow feature start');
     const config = await this.requireFlowConfig();
-    await this.assertBranchesNotBehindUpstream([config.developBranch], 'start Git Flow feature');
+    await this.pullRebaseBranchesBehindUpstream([config.developBranch]);
     const result = await this.exec(['flow', 'feature', 'start', name]);
     await this.assertLocalBranchExists(`${config.featurePrefix}${name}`, 'Git Flow feature start');
     return result;
@@ -2314,17 +2322,17 @@ export class GitService {
   async flowFeatureFinish(name: string): Promise<string> {
     this.assertSafeRef(name, 'flow feature finish');
     const config = await this.requireFlowConfig();
-    await this.assertBranchesNotBehindUpstream([
+    await this.pullRebaseBranchesBehindUpstream([
       config.developBranch,
       `${config.featurePrefix}${name}`,
-    ], 'finish Git Flow feature');
+    ]);
     return this.exec(['flow', 'feature', 'finish', name]);
   }
 
   async flowReleaseStart(version: string): Promise<string> {
     this.assertSafeRef(version, 'flow release start');
     const config = await this.requireFlowConfig();
-    await this.assertBranchesNotBehindUpstream([config.developBranch], 'start Git Flow release');
+    await this.pullRebaseBranchesBehindUpstream([config.developBranch]);
     const result = await this.exec(['flow', 'release', 'start', version]);
     await this.assertLocalBranchExists(`${config.releasePrefix}${version}`, 'Git Flow release start');
     return result;
@@ -2333,18 +2341,18 @@ export class GitService {
   async flowReleaseFinish(version: string): Promise<string> {
     this.assertSafeRef(version, 'flow release finish');
     const config = await this.requireFlowConfig();
-    await this.assertBranchesNotBehindUpstream([
+    await this.pullRebaseBranchesBehindUpstream([
       config.productionBranch,
       config.developBranch,
       `${config.releasePrefix}${version}`,
-    ], 'finish Git Flow release');
+    ]);
     return this.exec(['flow', 'release', 'finish', '-m', version, version]);
   }
 
   async flowHotfixStart(version: string): Promise<string> {
     this.assertSafeRef(version, 'flow hotfix start');
     const config = await this.requireFlowConfig();
-    await this.assertBranchesNotBehindUpstream([config.productionBranch], 'start Git Flow hotfix');
+    await this.pullRebaseBranchesBehindUpstream([config.productionBranch]);
     const result = await this.exec(['flow', 'hotfix', 'start', version]);
     await this.assertLocalBranchExists(`${config.hotfixPrefix}${version}`, 'Git Flow hotfix start');
     return result;
@@ -2353,11 +2361,11 @@ export class GitService {
   async flowHotfixFinish(version: string): Promise<string> {
     this.assertSafeRef(version, 'flow hotfix finish');
     const config = await this.requireFlowConfig();
-    await this.assertBranchesNotBehindUpstream([
+    await this.pullRebaseBranchesBehindUpstream([
       config.productionBranch,
       config.developBranch,
       `${config.hotfixPrefix}${version}`,
-    ], 'finish Git Flow hotfix');
+    ]);
     return this.exec(['flow', 'hotfix', 'finish', '-m', version, version]);
   }
 

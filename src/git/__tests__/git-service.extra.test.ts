@@ -276,27 +276,31 @@ describe('GitService — git-flow shortcuts', () => {
       .rejects.toThrow("branch 'feature/login' was not created");
   });
 
-  it('flowHotfixStart rejects when the production branch is behind upstream', async () => {
+  it('flowHotfixStart pulls with rebase when the production branch is behind upstream', async () => {
     (service as unknown as { branches: () => Promise<BranchInfo[]> }).branches = async () => [
       branch('main', { upstream: 'origin/main', behind: 2 }),
-      branch('develop', { upstream: 'origin/develop' }),
+      branch('develop', { current: true, upstream: 'origin/develop' }),
     ];
     const calls: string[][] = [];
     mockExec(service, async (args) => {
       calls.push(args);
       const key = args.join(' ');
       if (key in flowConfigResponses) return flowConfigResponses[key];
+      if (key === 'show-ref --verify --quiet refs/heads/hotfix/1.0.1') return '';
       return '';
     });
 
-    await expect(service.flowHotfixStart('1.0.1'))
-      .rejects.toThrow('main is behind origin/main by 2 commits');
-    expect(calls).not.toContainEqual(['flow', 'hotfix', 'start', '1.0.1']);
+    await service.flowHotfixStart('1.0.1');
+
+    expect(calls).toContainEqual(['checkout', 'main']);
+    expect(calls).toContainEqual(['pull', '--rebase']);
+    expect(calls).toContainEqual(['checkout', 'develop']);
+    expect(calls).toContainEqual(['flow', 'hotfix', 'start', '1.0.1']);
   });
 
-  it('flowReleaseFinish rejects when a related branch is behind upstream', async () => {
+  it('flowReleaseFinish pulls with rebase when a related branch is behind upstream', async () => {
     (service as unknown as { branches: () => Promise<BranchInfo[]> }).branches = async () => [
-      branch('main', { upstream: 'origin/main' }),
+      branch('main', { current: true, upstream: 'origin/main' }),
       branch('develop', { upstream: 'origin/develop', behind: 1 }),
       branch('release/1.0', { upstream: 'origin/release/1.0' }),
     ];
@@ -308,9 +312,29 @@ describe('GitService — git-flow shortcuts', () => {
       return '';
     });
 
-    await expect(service.flowReleaseFinish('1.0'))
-      .rejects.toThrow('develop is behind origin/develop by 1 commit');
-    expect(calls).not.toContainEqual(['flow', 'release', 'finish', '-m', '1.0', '1.0']);
+    await service.flowReleaseFinish('1.0');
+
+    expect(calls).toContainEqual(['checkout', 'develop']);
+    expect(calls).toContainEqual(['pull', '--rebase']);
+    expect(calls).toContainEqual(['checkout', 'main']);
+    expect(calls).toContainEqual(['flow', 'release', 'finish', '-m', '1.0', '1.0']);
+  });
+
+  it('flowHotfixStart stops before git-flow when pull --rebase fails', async () => {
+    (service as unknown as { branches: () => Promise<BranchInfo[]> }).branches = async () => [
+      branch('main', { current: true, upstream: 'origin/main', behind: 1 }),
+    ];
+    const calls: string[][] = [];
+    mockExec(service, async (args) => {
+      calls.push(args);
+      const key = args.join(' ');
+      if (key in flowConfigResponses) return flowConfigResponses[key];
+      if (key === 'pull --rebase') throw new GitError('rebase conflict', 1, args);
+      return '';
+    });
+
+    await expect(service.flowHotfixStart('1.0.1')).rejects.toThrow('rebase conflict');
+    expect(calls).not.toContainEqual(['flow', 'hotfix', 'start', '1.0.1']);
   });
 
   it('rejects flow names that start with "-" (CLI option injection)', async () => {

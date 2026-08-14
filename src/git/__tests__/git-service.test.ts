@@ -1431,20 +1431,24 @@ describe('GitService', () => {
         .rejects.toThrow("Branch 'main' does not exist");
     });
 
-    it('rejects init when production branch is behind upstream', async () => {
+    it('pulls with rebase before init when production branch is behind upstream', async () => {
       (service as unknown as { branches: () => Promise<BranchInfo[]> }).branches = async () => [
-        branch('main', { upstream: 'origin/main', behind: 1 }),
+        branch('main', { current: true, upstream: 'origin/main', behind: 1 }),
       ];
       const calls: string[][] = [];
       mockExec(service, async (args) => {
         calls.push(args);
         if (args.join(' ') === 'show-ref --verify --quiet refs/heads/main') return '';
+        const key = args.join(' ');
+        if (key in flowConfigResponses) return flowConfigResponses[key];
+        if (key === 'show-ref --verify --quiet refs/heads/develop') return '';
         return '';
       });
 
-      await expect(service.flowInit(flowOpts))
-        .rejects.toThrow('main is behind origin/main by 1 commit');
-      expect(calls).not.toContainEqual(['flow', 'init', '-f', '-d']);
+      await service.flowInit(flowOpts);
+
+      expect(calls).toContainEqual(['pull', '--rebase']);
+      expect(calls).toContainEqual(['flow', 'init', '-f', '-d']);
     });
 
     it('rejects using the same production and develop branch', async () => {
