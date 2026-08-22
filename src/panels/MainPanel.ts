@@ -49,6 +49,9 @@ export class MainPanel {
   private isFirstGetLog = true;
   private logSequence = 0;
   private searchSequence = 0;
+  private reflogSequence = 0;
+  private statsSequence = 0;
+  private repoGeneration = 0;
   // Two independent guards: selecting a commit (loads its file list) and
   // selecting a file (loads that file's diff) are different axes, so a file
   // request must not invalidate a pending commit-files request and vice versa.
@@ -360,16 +363,25 @@ export class MainPanel {
 
   /**
    * Point the panel at a different repo: rebuild the GitService, reset
-   * repo-specific state, swap the file watcher, and notify the sidebar. Callers
-   * still own posting the repo list and triggering the refresh.
+   * repo-specific state, swap the file watcher, notify repo-bound webview
+   * widgets, and notify the sidebar. Callers still own posting the repo list
+   * and triggering the refresh.
    *
    * NOTE: the sequence guards (logSequence/searchSequence/*Sequence) are
-   * intentionally NOT reset. They stay monotonic for the panel's lifetime so a
-   * request still in flight against the old repo can never share a seq with a
-   * fresh request against the new one — resetting reuses numbers and lets a
-   * stale response paint the previous repo's graph over the current one.
+   * intentionally NOT reset. They stay monotonic for the panel's lifetime and
+   * are advanced on repo switches so any request still in flight against the old
+   * repo cannot paint stale data over the current repo.
    */
   private swapRepo(newPath: string): void {
+    this.repoGeneration++;
+    this.logSequence++;
+    this.searchSequence++;
+    this.reflogSequence++;
+    this.statsSequence++;
+    this.commitFilesSequence.issue();
+    this.fileDiffSequence.issue();
+    this.multiCommitSectionsSequence.issue();
+
     this.repoPath = newPath;
     this.gitService = this.createGitService(newPath);
 
@@ -387,6 +399,7 @@ export class MainPanel {
     this.disposables.push(this.fileWatcher);
 
     MainPanel.onRepoChange?.(newPath);
+    this.post({ type: 'repoChanged', payload: { what: 'repo' } });
   }
 
   public async switchRepo(newPath: string): Promise<void> {
@@ -1250,7 +1263,9 @@ export class MainPanel {
           break;
         }
         case 'getReflog': {
+          const seq = ++this.reflogSequence;
           const result = await this.gitService.getReflog(message.payload?.limit ?? 200, message.payload?.ref ?? 'HEAD');
+          if (seq !== this.reflogSequence) break;
           this.post({ type: 'reflogData', payload: result });
           break;
         }
@@ -1288,10 +1303,12 @@ export class MainPanel {
         }
         // --- Statistics ---
         case 'getStats': {
+          const seq = ++this.statsSequence;
           const [byAuthor, byWeekdayHour] = await Promise.all([
             this.gitService.statsCommitsByAuthor(),
             this.gitService.statsCommitsByWeekdayHour(),
           ]);
+          if (seq !== this.statsSequence) break;
           this.post({
             type: 'statsData',
             payload: { byAuthor, byWeekdayHour },
@@ -1823,6 +1840,7 @@ export class MainPanel {
     }
     this.refreshing = true;
     this.refreshQueued = false;
+    const repoGeneration = this.repoGeneration;
     // Watcher events caused by the same git operation that triggered this refresh
     // would arrive ~immediately after; absorb them so they don't fire a second pass.
     this.fileWatcher.suppress();
@@ -1858,6 +1876,7 @@ export class MainPanel {
           this.gitService.log(logArgs),
           this.gitService.branches(),
         ]);
+        if (repoGeneration !== this.repoGeneration) return;
         this.post({ type: 'logData', payload: buildLogData(allFetched, branches) });
       } else {
         const [allFetched, branches, tags, remotes, stashes, worktrees] = await Promise.all([
@@ -1868,6 +1887,7 @@ export class MainPanel {
           this.gitService.stashList(),
           this.gitService.worktreeList(),
         ]);
+        if (repoGeneration !== this.repoGeneration) return;
         // Send as single combined message to ensure atomic update
         this.post({
           type: 'fullRefresh',
@@ -1880,7 +1900,7 @@ export class MainPanel {
       }
     } catch (err) {
       console.warn('Git Graph+: refresh failed:', err instanceof Error ? err.message : err);
-      if (err instanceof GitError && /not a git repository/.test(err.stderr)) {
+      if (repoGeneration === this.repoGeneration && err instanceof GitError && /not a git repository/.test(err.stderr)) {
         try { this.post({ type: 'notGitRepo' }); } catch { /* panel disposed */ }
       }
     } finally {

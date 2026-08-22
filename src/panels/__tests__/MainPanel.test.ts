@@ -23,6 +23,9 @@ const H = vi.hoisted(() => {
     getConflictFiles: vi.fn(async () => []),
     getOperationState: vi.fn(async () => ({ type: null })),
     getRemoteUrl: vi.fn(async () => ''),
+    getReflog: vi.fn(async () => ({ entries: [], hasMore: false })),
+    statsCommitsByAuthor: vi.fn(async () => []),
+    statsCommitsByWeekdayHour: vi.fn(async () => []),
     stashSave: vi.fn(async () => {}),
     checkout: vi.fn(async () => {}),
     pull: vi.fn(async () => {}),
@@ -141,6 +144,9 @@ beforeEach(() => {
   H.git.getOperationState.mockResolvedValue({ type: null });
   H.git.getConflictFiles.mockResolvedValue([]);
   H.git.getRemoteUrl.mockResolvedValue('');
+  H.git.getReflog.mockResolvedValue({ entries: [], hasMore: false });
+  H.git.statsCommitsByAuthor.mockResolvedValue([]);
+  H.git.statsCommitsByWeekdayHour.mockResolvedValue([]);
   H.git.showCommitDiff.mockResolvedValue([]);
   H.git.fileExistsAtRef.mockResolvedValue(true);
   H.git.getEmptyTreeRef.mockResolvedValue('4b825dc642cb6eb9a060e54bf8d69288fbee4904');
@@ -322,6 +328,18 @@ describe('MainPanel message routing', () => {
     await dispatch({ type: 'switchRepo', payload: { path: '/somewhere/else' } });
     expect(postedOfType('error').length).toBeGreaterThan(0);
   });
+
+  it('notifies repo-bound tabs when switching repositories', async () => {
+    H.repos = [
+      { path: '/repo', name: 'repo', type: 'root' },
+      { path: '/repo-b', name: 'repo-b', type: 'nested' },
+    ];
+    await dispatch({ type: 'getRepoList' });
+
+    await dispatch({ type: 'switchRepo', payload: { path: '/repo-b' } });
+
+    expect(postedOfType('repoChanged').some(m => m.payload?.what === 'repo')).toBe(true);
+  });
 });
 
 describe('MainPanel error handling', () => {
@@ -442,6 +460,48 @@ describe('MainPanel orchestration logic', () => {
     expect(lastCommits.map(c => c.hash)).toEqual(['bbbbbbb2']);
     // The foreign commit from the old repo must never reach the webview.
     expect(logs.some(l => (l.payload!.commits as Array<{ hash: string }>).some(c => c.hash === 'aaaaaaa1'))).toBe(false);
+  });
+
+  it('discards stale reflog and stats responses from the previous repo after switching repos', async () => {
+    H.repos = [
+      { path: '/repo', name: 'repo', type: 'root' },
+      { path: '/repo-b', name: 'repo-b', type: 'nested' },
+    ];
+    await dispatch({ type: 'getRepoList' });
+
+    let resolveOldReflog!: (v: unknown) => void;
+    let resolveOldAuthors!: (v: unknown) => void;
+    let resolveOldHours!: (v: unknown) => void;
+
+    H.git.getReflog
+      .mockImplementationOnce(() => new Promise(r => { resolveOldReflog = r as (v: unknown) => void; }))
+      .mockResolvedValue({ entries: [{ hash: 'bbbbbbb2', shortHash: 'bbbbbbb', selector: 'HEAD@{0}', message: 'commit: new', date: '', dangling: false }], hasMore: false });
+    H.git.statsCommitsByAuthor
+      .mockImplementationOnce(() => new Promise(r => { resolveOldAuthors = r as (v: unknown) => void; }))
+      .mockResolvedValue([{ author: 'New', email: 'new@example.com', count: 1 }]);
+    H.git.statsCommitsByWeekdayHour
+      .mockImplementationOnce(() => new Promise(r => { resolveOldHours = r as (v: unknown) => void; }))
+      .mockResolvedValue([{ weekday: 1, hour: 9, count: 1 }]);
+
+    const pOldReflog = dispatch({ type: 'getReflog', payload: {} });
+    const pOldStats = dispatch({ type: 'getStats' });
+
+    await dispatch({ type: 'switchRepo', payload: { path: '/repo-b' } });
+    await dispatch({ type: 'getReflog', payload: {} });
+    await dispatch({ type: 'getStats' });
+
+    resolveOldReflog({ entries: [{ hash: 'aaaaaaa1', shortHash: 'aaaaaaa', selector: 'HEAD@{0}', message: 'commit: old', date: '', dangling: false }], hasMore: false });
+    resolveOldAuthors([{ author: 'Old', email: 'old@example.com', count: 1 }]);
+    resolveOldHours([{ weekday: 0, hour: 0, count: 1 }]);
+    await Promise.all([pOldReflog, pOldStats]);
+
+    const reflogs = postedOfType('reflogData');
+    expect(reflogs.some(m => (m.payload!.entries as Array<{ hash: string }>).some(e => e.hash === 'aaaaaaa1'))).toBe(false);
+    expect((reflogs.at(-1)!.payload!.entries as Array<{ hash: string }>)[0].hash).toBe('bbbbbbb2');
+
+    const stats = postedOfType('statsData');
+    expect(stats.some(m => (m.payload!.byAuthor as Array<{ author: string }>).some(a => a.author === 'Old'))).toBe(false);
+    expect((stats.at(-1)!.payload!.byAuthor as Array<{ author: string }>)[0].author).toBe('New');
   });
 
   it('refreshAll applies the saved filter before the first getLog so it does not flash the full unfiltered graph', async () => {
