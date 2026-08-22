@@ -145,6 +145,12 @@ export async function ensureLanguage(h: HighlighterCore, lang: string): Promise<
   }
 }
 
+export function warmHighlighterLanguages(langs: string[] = ['vue', 'svelte', 'astro']): void {
+  void getHighlighter()
+    .then(h => Promise.all(langs.map(lang => ensureLanguage(h, lang))))
+    .catch(() => {});
+}
+
 /** Theme that matches the current VS Code color theme, so highlighted tokens
  *  sit correctly on the diff background (dark-plus on dark, light-plus on light). */
 export function activeShikiTheme(): 'dark-plus' | 'light-plus' {

@@ -306,6 +306,9 @@
     // shown. Toggling showFullDiff changes renderHunks and re-runs this effect,
     // so the revealed lines get highlighted then.
     const visibleHunks = renderHunks;
+    const mode = diffMode;
+    const needsOldSide = needsHighlightedSide(visibleHunks, 'old', mode);
+    const needsNewSide = needsHighlightedSide(visibleHunks, 'new', mode);
     const theme = shikiTheme; // capture so a theme switch invalidates the pass
     // Yield to the event loop between chunks so a multi-thousand-line diff
     // doesn't freeze the panel. Each batch processes CHUNK_SIZE lines then
@@ -318,18 +321,19 @@
         if (target.content) {
           const oldLines = countSourceLines(target.content.oldText);
           const newLines = countSourceLines(target.content.newText);
-          if (oldLines + newLines <= MAX_FULL_FILE_HIGHLIGHT_LINES) {
+          const linesToHighlight = (needsOldSide ? oldLines : 0) + (needsNewSide ? newLines : 0);
+          if (linesToHighlight <= MAX_FULL_FILE_HIGHLIGHT_LINES) {
             const [oldReady, newReady] = await Promise.all([
-              oldLang ? ensureLanguage(h, oldLang) : Promise.resolve(false),
-              newLang ? ensureLanguage(h, newLang) : Promise.resolve(false),
+              needsOldSide && oldLang ? ensureLanguage(h, oldLang) : Promise.resolve(false),
+              needsNewSide && newLang ? ensureLanguage(h, newLang) : Promise.resolve(false),
             ]);
             if (cancelled || diff !== target) return;
             const newMap = new Map<string, string>();
-            if (oldReady) {
+            if (needsOldSide && oldReady) {
               highlightCodeLinesSync(h, target.content.oldText, oldLang, theme)
                 .forEach((html, idx) => newMap.set(`old:${idx + 1}`, html));
             }
-            if (newReady) {
+            if (needsNewSide && newReady) {
               highlightCodeLinesSync(h, target.content.newText, newLang, theme)
                 .forEach((html, idx) => newMap.set(`new:${idx + 1}`, html));
             }
@@ -369,6 +373,24 @@
       .catch(() => {});
     return () => { cancelled = true; };
   });
+
+  function needsHighlightedSide(
+    hunks: DiffData['hunks'],
+    side: 'old' | 'new',
+    mode: 'inline' | 'side-by-side',
+  ): boolean {
+    for (const hunk of hunks) {
+      for (const line of hunk.lines) {
+        if (side === 'old') {
+          if (line.type === 'delete') return true;
+          if (mode === 'side-by-side' && line.type === 'context') return true;
+        } else if (line.type === 'add' || line.type === 'context') {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
 
   function countSourceLines(text: string): number {
     if (!text) return 0;

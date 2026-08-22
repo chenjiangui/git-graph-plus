@@ -49,6 +49,7 @@ import AmendModal from './components/modals/AmendModal.svelte';
   import { tooltip } from './lib/actions/tooltip';
   import DirtyActionModal from './components/modals/DirtyActionModal.svelte';
   import { dragRebaseMessage, dragMergeMessage } from './lib/utils/dragDrop';
+  import { warmHighlighterLanguages } from './lib/utils/highlighter';
 
   const vscode = getVsCodeApi();
 
@@ -64,6 +65,20 @@ import AmendModal from './components/modals/AmendModal.svelte';
   let conflict = $state<{ operation: string; files: Array<{ path: string; resolved: boolean }> } | null>(null);
   let rebasePaused = $state(false);
   let showAbortConfirmModal = $state(false);
+
+  function scheduleHighlighterWarmup(): () => void {
+    const run = () => warmHighlighterLanguages(['vue', 'svelte', 'astro']);
+    const win = window as Window & {
+      requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    if (win.requestIdleCallback) {
+      const handle = win.requestIdleCallback(run, { timeout: 2500 });
+      return () => win.cancelIdleCallback?.(handle);
+    }
+    const handle = window.setTimeout(run, 1000);
+    return () => window.clearTimeout(handle);
+  }
 
   // Non-shared modals (unique to Activity Bar)
   let showStashDropModal = $state(false);
@@ -214,6 +229,7 @@ import AmendModal from './components/modals/AmendModal.svelte';
     }
 
     window.addEventListener('message', handleMessage);
+    const cancelHighlighterWarmup = scheduleHighlighterWarmup();
 
     // Request initial data
     commitStore.setLoading(true);
@@ -238,6 +254,7 @@ import AmendModal from './components/modals/AmendModal.svelte';
       window.removeEventListener('keydown', handleGlobalKeydown);
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', handleVisibility);
+      cancelHighlighterWarmup();
     };
   });
 
