@@ -37,6 +37,7 @@ const H = vi.hoisted(() => {
     messageHandler: null as null | ((m: unknown) => unknown),
     panel: null as null | { webview: { postMessage: ReturnType<typeof vi.fn> } },
     repos: [] as Array<{ path: string; name: string; type: string }>,
+    gitApiRepos: [] as string[],
   };
 });
 
@@ -77,6 +78,21 @@ vi.mock('vscode', () => {
       fs: { writeFile: vi.fn(async () => {}) },
     },
     commands: { executeCommand: vi.fn() },
+    extensions: {
+      getExtension: vi.fn((id: string) => {
+        if (id !== 'vscode.git') return undefined;
+        const extensionExports = {
+          getAPI: () => ({
+            repositories: H.gitApiRepos.map(repoPath => ({ rootUri: { fsPath: repoPath } })),
+          }),
+        };
+        return {
+          isActive: true,
+          exports: extensionExports,
+          activate: vi.fn(async () => extensionExports),
+        };
+      }),
+    },
     l10n: { t: (k: string) => k },
     env: { language: 'en', clipboard: { writeText: vi.fn() } },
     Uri: {
@@ -98,6 +114,7 @@ vi.mock('../../git/vscode-git-bridge', () => ({ triggerVSCodeGitAuth: vi.fn(asyn
 
 import { MainPanel } from '../MainPanel';
 import { GitError } from '../../git/git-service';
+import { RepoDiscoveryService } from '../../services/repo-discovery';
 
 const extUri = { fsPath: '/ext' } as unknown as import('vscode').Uri;
 
@@ -128,6 +145,7 @@ beforeEach(() => {
   H.git.fileExistsAtRef.mockResolvedValue(true);
   H.git.getEmptyTreeRef.mockResolvedValue('4b825dc642cb6eb9a060e54bf8d69288fbee4904');
   H.repos = [{ path: '/repo', name: 'repo', type: 'root' }];
+  H.gitApiRepos = [];
   (MainPanel as unknown as { currentPanel: unknown }).currentPanel = undefined;
   MainPanel.createOrShow(extUri, '/repo');
 });
@@ -259,6 +277,23 @@ describe('MainPanel message routing', () => {
     expect(data.payload).toHaveProperty('branches');
     expect(data.payload).toHaveProperty('tags');
     expect(data.payload).toHaveProperty('worktrees');
+  });
+
+  it('includes repositories already discovered by VS Code Git in the repo list scan', async () => {
+    H.gitApiRepos = ['/workspace/apps/deep/repo-b'];
+    H.repos = [
+      { path: '/repo', name: 'repo', type: 'root' },
+      { path: '/workspace/apps/deep/repo-b', name: 'repo-b', type: 'root' },
+    ];
+
+    await dispatch({ type: 'getRepoList' });
+
+    expect(RepoDiscoveryService.discoverRepos).toHaveBeenLastCalledWith(
+      expect.arrayContaining(['/workspace/apps/deep/repo-b']),
+    );
+    const data = postedOfType('repoList').at(-1)!;
+    const repoPaths = (data.payload!.repos as Array<{ path: string }>).map(repo => repo.path);
+    expect(repoPaths).toContain('/workspace/apps/deep/repo-b');
   });
 
   it('getCommitDiff posts the file list for the commit', async () => {

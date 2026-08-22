@@ -219,6 +219,7 @@ import AmendModal from './components/modals/AmendModal.svelte';
     commitStore.setLoading(true);
     vscode.postMessage({ type: 'getLog', payload: {} });
     vscode.postMessage({ type: 'getBranches' });
+    vscode.postMessage({ type: 'getRepoList' });
     vscode.postMessage({ type: 'checkFlowStatus' });
 
     // Refresh conflict status when webview becomes visible

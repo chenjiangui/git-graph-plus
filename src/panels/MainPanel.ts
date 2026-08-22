@@ -144,6 +144,34 @@ export class MainPanel {
     } as ModalDefaults;
   }
 
+  /**
+   * Use VS Code's built-in Git extension as an authoritative source for repos
+   * already discovered by the editor. The filesystem scanner below is still
+   * useful as a fallback/supplement, but it intentionally has depth/ignore
+   * limits and can miss repos that VS Code's SCM view already knows about.
+   */
+  private async getVsCodeGitRepoPaths(): Promise<string[]> {
+    try {
+      const gitExtension = vscode.extensions.getExtension('vscode.git');
+      if (!gitExtension) return [];
+
+      const extensionExports = gitExtension.isActive
+        ? gitExtension.exports
+        : await gitExtension.activate();
+      const api = (extensionExports as {
+        getAPI?: (version: number) => {
+          repositories?: Array<{ rootUri?: vscode.Uri }>;
+        };
+      } | undefined)?.getAPI?.(1);
+
+      return (api?.repositories ?? [])
+        .map(repo => repo.rootUri?.fsPath)
+        .filter((repoPath): repoPath is string => typeof repoPath === 'string' && repoPath.length > 0);
+    } catch {
+      return [];
+    }
+  }
+
   // Width (px) of the colored branch-badge bar, mapped from the user setting.
   private readBadgeBarWidth(): number {
     const level = vscode.workspace
@@ -1845,12 +1873,23 @@ export class MainPanel {
   }
 
   private repoListPending: Promise<void> | null = null;
+  private repoListForceQueued = false;
 
   public sendRepoList(forceDiscovery = false): Promise<void> {
     // Deduplicate concurrent calls
-    if (!this.repoListPending) {
-      this.repoListPending = this.doSendRepoList(forceDiscovery).finally(() => { this.repoListPending = null; });
+    if (this.repoListPending) {
+      if (!forceDiscovery) {
+        return this.repoListPending;
+      }
+      this.repoListForceQueued = true;
+      return this.repoListPending.then(() => {
+        if (!this.repoListForceQueued) return;
+        this.repoListForceQueued = false;
+        return this.sendRepoList(true);
+      });
     }
+
+    this.repoListPending = this.doSendRepoList(forceDiscovery).finally(() => { this.repoListPending = null; });
     return this.repoListPending;
   }
 
@@ -1862,6 +1901,9 @@ export class MainPanel {
       const workspacePaths = new Set<string>();
       for (const f of vscode.workspace.workspaceFolders ?? []) {
         workspacePaths.add(f.uri.fsPath);
+      }
+      for (const repoPath of await this.getVsCodeGitRepoPaths()) {
+        workspacePaths.add(repoPath);
       }
       workspacePaths.add(this.repoPath);
       const discovered = await RepoDiscoveryService.discoverRepos([...workspacePaths]);
@@ -1876,7 +1918,7 @@ export class MainPanel {
 
       let active = vscode.Uri.file(this.repoPath).fsPath;
       this.repoPath = active;
-      if (repos.length > 0 && !repos.some(r => r.path === active)) {
+      if (repos.length > 0 && !repos.some(r => samePath(r.path, active))) {
         // Current path is not a repo, switch to the first discovered one
         active = repos[0].path;
         this.swapRepo(active);

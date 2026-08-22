@@ -52,12 +52,13 @@ afterEach(() => {
 });
 
 describe('App — initial requests', () => {
-  it('posts getLog, getBranches, and checkFlowStatus on mount', async () => {
+  it('posts getLog, getBranches, getRepoList, and checkFlowStatus on mount', async () => {
     render(App);
     await waitFor(() => {
       const types = globalThis.__postedMessages.map(m => (m.data as { type?: string }).type);
       expect(types).toContain('getLog');
       expect(types).toContain('getBranches');
+      expect(types).toContain('getRepoList');
       expect(types).toContain('checkFlowStatus');
     });
   });
