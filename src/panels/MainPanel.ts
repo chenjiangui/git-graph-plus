@@ -16,7 +16,7 @@ import { AvatarCache } from '../services/avatar-cache';
 import { resolveGitDirs, shouldRefreshGraph } from '../services/file-watcher-helpers';
 import { RepoDiscoveryService, RepoInfo } from '../services/repo-discovery';
 import type { WebviewMessage, ModalDefaults } from '../utils/message-bus';
-import { resolveCommitLinkRules, type LinkRule } from '../git/commit-link-rules';
+import { remoteUrlToRepositoryWebUrl, resolveCommitLinkRules, type LinkRule } from '../git/commit-link-rules';
 import {
   resolveRepoRelativePath as resolveRepoRelativePathUtil,
   assertSafeArgPath as assertSafeArgPathUtil,
@@ -796,6 +796,28 @@ export class MainPanel {
           if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
             await vscode.env.openExternal(vscode.Uri.parse(url));
           }
+          break;
+        }
+        case 'openRemoteRepository': {
+          const remoteName = message.payload?.remote?.trim();
+          let remoteUrl: string | undefined;
+
+          if (remoteName) {
+            remoteUrl = await this.gitService.getRemoteUrl(remoteName);
+          } else {
+            const remotes = await this.gitService.remotes();
+            const remote = remotes.find(r => r.name === 'origin') ?? remotes[0];
+            if (!remote) {
+              throw new Error(vscode.l10n.t('noRemotes'));
+            }
+            remoteUrl = remote.fetchUrl || remote.pushUrl || await this.gitService.getRemoteUrl(remote.name);
+          }
+
+          const url = remoteUrlToRepositoryWebUrl(remoteUrl);
+          if (!url) {
+            throw new Error(vscode.l10n.t('openRemoteRepositoryFailed', remoteUrl));
+          }
+          await vscode.env.openExternal(vscode.Uri.parse(url));
           break;
         }
         case 'openExtensionSettings': {
