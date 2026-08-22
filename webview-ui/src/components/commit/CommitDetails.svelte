@@ -178,7 +178,7 @@
   // passed to FileDiffView and the tree's "Reverse File" action.
   const canReverseInThisView = $derived(!!commit && stashIndex === null);
 
-  let filesPanelWidth = $state(360);
+  let filesPanelWidth = $state(300);
   let isResizing = $state(false);
   let resizeStartX = 0;
   let resizeStartWidth = 0;
